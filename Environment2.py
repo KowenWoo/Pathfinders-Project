@@ -14,6 +14,9 @@ class Ltc(simpy.Container):
         self.coord = coord
         self.staff = staff
         self.patients = patients
+
+    def __str__(self):
+        return str(self.coord)
     
 class Elder:
     def __init__(self, env, coords, age, chronic, disability, mental_health):
@@ -24,8 +27,9 @@ class Elder:
         self.disability = disability #bool
         self.mental_health = mental_health #int 1-10
         self.ltc = False
-        self.health = 0
-        self.radius = 0
+        self.deceased = False
+        self.set_health()
+        self.set_radius()
 
     def set_health(self):
         '''
@@ -43,7 +47,6 @@ class Elder:
         '''
         if self.health > 50:
             self.radius = self.health * 5
-
         else:
             self.radius = self.health * 2.5
 
@@ -51,25 +54,28 @@ class Elder:
         '''
         calculate lifespan of person based off decay rate of 0.5
         '''
-        steps = self.health / 0.5
-        return int(steps) + (1 if self.health % 0.5 != 0 else 0)
+        steps = self.health / 2
+        return int(steps) + (1 if self.health % 2 != 0 else 0)
+    
+    def decay(self):
+        self.health -= 2
+        if self.health <= 0:
+            self.set_deceased()
+
+    def set_deceased(self):
+        self.deceased = True
 
     def set_ltc(self):
         self.ltc = True
 
     def outside_radius(self, distance):
+        global OUT_RADIUS
         if distance > self.radius:
-            global OUT_RADIUS 
             OUT_RADIUS += 1
-        else:
-            return
         
     def no_ltc(self):
         global NO_LTC
-        NO_LTC += 1
-
-    def __str__(self):
-        return 
+        NO_LTC += 1 
 
 
 class LTCFinderRTree:
@@ -100,7 +106,7 @@ class LTCFinderRTree:
             ltc = self.centers[name]
 
             if ltc.patients != 0: #error handling for staff:patient
-                s_p_ratio = ltc.staff / ltc.patients
+                s_p_ratio = ltc.staff / (ltc.capacity - ltc.level)
             else:
                 s_p_ratio = ltc.staff
             
@@ -130,7 +136,7 @@ def extract_info(file, nbr_ltc):
             line = data[i].split(",")
             names.append(line[4])
             coords.append((float(line[1]), float(line[0])))
-            beds.append(rand.randint(10, 100)) #randomly chosen
+            beds.append(rand.randint(10, 20)) #randomly chosen
             staff.append(rand.randint(20, 50))#randomly chosen
         return names, coords, beds, staff
      
@@ -141,7 +147,7 @@ def pick_coords():
     based off rough estimate of range of coordinates in first 20 
     LTC in csv file I have
     '''
-    return [rand.uniform(-140, -100), rand.uniform(50, 65)]
+    return [rand.uniform(50, 65), rand.uniform(-140, -100)]
 
 def pick_age():
     '''
@@ -185,14 +191,11 @@ def det_mental_health():
 
 def init_population(env, pop_size):
     population = []
-    coords = pick_coords()
     ages = pick_age()
-    chronic = chronic_prob()
-    disability = disability_prob()
     mental_health = det_mental_health()
 
     for i in range(pop_size):
-        population.append(Elder(env, coords, rand.choice(ages), chronic, disability, rand.choice(mental_health)))
+        population.append(Elder(env, pick_coords(), rand.choice(ages), chronic_prob(), disability_prob(), rand.choice(mental_health)))
     return population
 
 
@@ -200,43 +203,58 @@ def go_to_ltc(env, rtree, person):
     '''
     Logic of simulation called upon by generator
     '''
-    ltc, distance, available = rtree.find_ltc(person.coord)
-    if available:
-        person.outside_radius(distance)
-        #person gets a bed at ltc found
-        print(f"{person} has found an available bed at {ltc}")
-        person.set_ltc()
-        yield ltc.get(1)
+    while person.deceased == False:
+        ltc, distance, available = rtree.find_ltc(person.coords)
+        if distance > person.radius:
+            person.outside_radius(distance)
 
-        #person occupies bed until end of calculated lifespan
-        yield env.timeout(person.life_span)
+        if available:
+            # person gets a bed at ltc found
+            print(f"{person} has found an available bed at {ltc}")
+            person.set_ltc()
+            yield ltc.get(1)
 
-        #bed becomes available
-        print(f"{person} has died and a bed is available at {ltc}")
-        yield ltc.put(1)
+            # person occupies bed until end of calculated lifespan
+            yield env.timeout(person.life_span())
 
-    else:
-        person.no_ltc()
-        person.outside_radius(distance)
-
-        #wait for available bed in nearest LTC
-        req_time = env.now
-        with ltc.container.request() as req:  # Generate a request event
-            yield req # Wait for access
-            yield env.timeout(1)
-
-        #checks if person is alive to occupy bed
-        wait_time = env.now - req_time
-        if wait_time * 0.5 >= person.health:
+            # bed becomes available
+            person.set_deceased()
             print(f"{person} has died and a bed is available at {ltc}")
             yield ltc.put(1)
         else:
-            yield env.timeout(person.life_span)
+            # wait for available bed in nearest LTC
+            req_time = env.now
+            with ltc.get(1) as req:  # Generate a request event
+                print(f"{person} is waiting for a bed at {ltc} at {env.now}")
+                yield req  # Wait for access
+                yield env.timeout(1)
 
-            #bed becomes available
-            print(f"{person} has died and a bed is available at {ltc}")
-            yield ltc.put(1)
+            # checks if person is alive to occupy bed
+            wait_time = env.now - req_time
+            if wait_time * 0.5 >= person.health:
+                person.set_deceased()
+                print(f"{person} has died and a bed is available at {ltc}")
+                yield ltc.put(1)
+                person.no_ltc()
+            else:
+                print(f"{person} is off waiting list and found bed")
+                person.set_ltc()
+                yield env.timeout(person.life_span())
 
+                # bed becomes available
+                person.set_deceased()
+                print(f"{person} has died and a bed is available at {ltc}")
+                yield ltc.put(1)
+
+
+# def decrease_health(env, people):
+#     while True:
+#         for person in people[:]:  # Use a slice to avoid modification issues during iteration
+#             person.decay()
+#             if person.health <= 0:
+#                 print(f"Removing {person} from the population")
+#                 people.remove(person)
+#         yield env.timeout(1)
 
 def gen_migration(env, rtree, people):
     '''
@@ -250,8 +268,8 @@ def gen_migration(env, rtree, people):
 def main():
 
     #initialization info
-    nbr_ltc = 20
-    pop_size = 500             
+    nbr_ltc = 5
+    pop_size = 100             
     file = "C:/Users/kowen/OneDrive/AI Pathfinders/Datasets/LTC_locations.csv"
     names, coords, beds, staff = extract_info(file, nbr_ltc)
     patients = [0] * nbr_ltc
@@ -270,9 +288,10 @@ def main():
     global OUT_RADIUS #num of people who had to travel outside prefferred radius for LTC
     OUT_RADIUS = 0
 
+    # Add the decay process to the environment
     env.process(gen_migration(env, rtree, population_objects)) #create generator object
-    env.run(10)
+    # env.process(decrease_health(env, population_objects))
+    env.run(300)
 
 main()
-
-
+print(NO_LTC, OUT_RADIUS)
