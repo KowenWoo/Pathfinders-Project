@@ -1,2 +1,2 @@
-# Pathfinders-Project
-Simulation of long term care center expansion using Deep-Q network in order to find optimal policy for Indigenous elderly population.
+# IndigeCare Sim
+AI driven tool to simulate the long term care landscape in Canada and determine the best policy to maximize accessibility for Indigenous Communities.
